@@ -90,15 +90,15 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 		}
 		ch <- prometheus.MustNewConstMetric(e.up, prometheus.GaugeValue, 1, host.hostname)
 
-//		data, err := ioutil.ReadAll(resp.Body)
-//		resp.Body.Close()
-//		if resp.StatusCode != 200 {
-//			if err != nil {
-//				data = []byte(err.Error())
-//			}
-//			return fmt.Errorf("Status %s (%d): %s", resp.Status, resp.StatusCode, data)
-//		}
-//	}
+		data, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			if err != nil {
+				data = []byte(err.Error())
+			}
+			return fmt.Errorf("Status %s (%d): %s", resp.Status, resp.StatusCode, data)
+		}
+	}
     return nil
 }
 
