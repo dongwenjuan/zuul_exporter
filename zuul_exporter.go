@@ -14,10 +14,12 @@
 package main
 
 import (
-        "fmt"
+    "fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
-        "sync"
+	"strings"
+    "sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
@@ -33,18 +35,23 @@ func init() {
 	prometheus.MustRegister(version.NewCollector("zuul_exporter"))
 }
 
+type zuulHost struct {
+	hostname    string
+	port        string
+}
+
 type Exporter struct {
-	scrapeURI       string
-        mutex           sync.Mutex
+	scrapeHosts     []zuulHost
+    mutex           sync.Mutex
 	client          *http.Client
 	up              *prometheus.Desc
 	scrapeFailures  prometheus.Counter
 	zuulVersion     *prometheus.Desc
 }
 
-func NewExporter(url string) *Exporter {
+func NewExporter(zuulhosts []zuulHost) *Exporter {
 	return &Exporter{
-		scrapeURI: url,
+		scrapeHosts: zuulhosts,
 		client: &http.Client{
 			Transport: &http.Transport{
 				TLSClientConfig: nil},
@@ -52,7 +59,7 @@ func NewExporter(url string) *Exporter {
 		up: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "up"),
 			"Could the zuul server be reached",
-			nil,
+			[]string{"host"},
 			nil),
 		scrapeFailures: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
@@ -74,42 +81,25 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
-	resp, err := e.client.Get(e.scrapeURI)
-	if err != nil {
-		ch <- prometheus.MustNewConstMetric(e.up, prometheus.GaugeValue, 0)
-		return fmt.Errorf("Error scraping zuul: %v", err)
-	}
-	ch <- prometheus.MustNewConstMetric(e.up, prometheus.GaugeValue, 1)
-
-	data, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	for _, host := range e.scrapeHosts {
+		scrapeURI := "http://" + host.hostname + ":" + host.port + "/status"
+		resp, err := e.client.Get(scrapeURI)
 		if err != nil {
-			data = []byte(err.Error())
+			ch <- prometheus.MustNewConstMetric(e.up, prometheus.GaugeValue, 0, host.hostname)
+			return fmt.Errorf("Error scraping zuul: %v", err)
 		}
-		return fmt.Errorf("Status %s (%d): %s", resp.Status, resp.StatusCode, data)
-	}
+		ch <- prometheus.MustNewConstMetric(e.up, prometheus.GaugeValue, 1, host.hostname)
 
-//	lines := strings.Split(string(data), "\n")
-//	for _, item := range data {
-//		key, v := splitkv(item)
-//		if err != nil {
-//			fmt.Errorf("Error to split item: %s", item)
-//			continue
-//		}
-//
-//		switch {
-//		case key == "zuul_version":
-//			val, err := strconv.ParseFloat(v, 64)
+//		data, err := ioutil.ReadAll(resp.Body)
+//		resp.Body.Close()
+//		if resp.StatusCode != 200 {
 //			if err != nil {
-//				return err
+//				data = []byte(err.Error())
 //			}
-//			ch <- prometheus.MustNewConstMetric(e.zuulVersion, prometheus.GaugeValue, val)
-//		case key == "pipelines":
+//			return fmt.Errorf("Status %s (%d): %s", resp.Status, resp.StatusCode, data)
 //		}
 //	}
-
-        return nil
+    return nil
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
@@ -121,14 +111,13 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		e.scrapeFailures.Collect(ch)
 	}
 	return
-
 }
 
 func main() {
 	var (
-		listenAddress   = kingpin.Flag("web.listen-address", "The address on which to expose the web interface and generated Prometheus metrics.").Default(":9102").String()
+		listenAddress   = kingpin.Flag("web.listen-address", "The address on which to expose the web interface and generated Prometheus metrics.").Default(":9532").String()
 		metricsEndpoint = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
-		zuulAddress     = kingpin.Flag("zuul.listen-address", "The zuul address on which to collect zuul metric.").Default("").String()
+		zuulAddressList = kingpin.Flag("zuul.listen-address-list", "The zuul list addresses.").Default("").String()
 	)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -136,16 +125,24 @@ func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 
-	if *zuulAddress == "" {
-		log.Fatalln("Zuul address must be specified for collect metrics.")
+	zuulhosts := []zuulHost{}
+	if *zuulAddressList == "" {
+		log.Fatalln("zuul.listen-address-list must be specified for collect metrics.")
+	}
+	for _, address := range strings.Split(*zuulAddressList, ",") {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			log.Fatalln("Bad one zuul listen address: %s .", address)
+		}
+		zuulhosts = append(zuulhosts, zuulHost{hostname: host, port: port})
 	}
 
-	exporter := NewExporter(*zuulAddress)
+	exporter := NewExporter(zuulhosts)
 	prometheus.MustRegister(exporter)
 
 	log.Infoln("Starting Zuul -> Prometheus Exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
-	log.Infof("Accepting zuul address: %s", *zuulAddress)
+	log.Infof("Accepting zuul address: %s", *zuulAddressList)
 	log.Infof("Accepting Prometheus Requests on %s", *listenAddress)
 
 	http.Handle(*metricsEndpoint, prometheus.Handler())
